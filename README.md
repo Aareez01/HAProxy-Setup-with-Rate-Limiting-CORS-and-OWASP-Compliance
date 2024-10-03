@@ -17,73 +17,100 @@ Create a new configuration file for HAProxy, typically located at `/etc/haproxy/
 
 ```ini
 global
-    log /dev/log    local0
-    log /dev/log    local1 notice
-    chroot /var/lib/haproxy
-    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
-    stats timeout 30s
-    user haproxy
-    group haproxy
-    daemon
+        log /dev/log    local0
+        log /dev/log    local1 notice
+        chroot /var/lib/haproxy
+        stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+        stats timeout 30s
+        user haproxy
+        group haproxy
+        daemon
+        
+        # Load Lua CORS Library
+        lua-load /etc/haproxy/cors.lua
 
-    # Load Lua CORS Library
-    lua-load /etc/haproxy/cors.lua
+        # Default SSL material locations
+        ca-base /etc/ssl/certs
+        crt-base /etc/ssl/private
 
-    # Default SSL material locations
-    ca-base /etc/ssl/certs
-    crt-base /etc/ssl/private
-
-    # SSL configuration
-    ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
-    ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
-    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+        # See: https://ssl-config.mozilla.org/#server=haproxy&server-version=2.0.3&config=intermediate
+        ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
+        ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+        ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
 
 defaults
-    log     global
-    mode    http
-    option  httplog
-    option  dontlognull
-    timeout connect 5000
-    timeout client  50000
-    timeout server  50000
-    errorfile 400 /etc/haproxy/errors/400.http
-    errorfile 403 /etc/haproxy/errors/403.http
-    errorfile 408 /etc/haproxy/errors/408.http
-    errorfile 500 /etc/haproxy/errors/500.http
-    errorfile 502 /etc/haproxy/errors/502.http
-    errorfile 503 /etc/haproxy/errors/503.http
-    errorfile 504 /etc/haproxy/errors/504.http
+        log     global
+        mode    http
+        option  httplog
+        option  dontlognull
+        timeout connect 5000
+        timeout client  50000
+        timeout server  50000
+        errorfile 400 /etc/haproxy/errors/400.http
+        errorfile 403 /etc/haproxy/errors/403.http
+        errorfile 408 /etc/haproxy/errors/408.http
+        errorfile 500 /etc/haproxy/errors/500.http
+        errorfile 502 /etc/haproxy/errors/502.http
+        errorfile 503 /etc/haproxy/errors/503.http
+        errorfile 504 /etc/haproxy/errors/504.http
 
 frontend https_front
-    bind *:443 ssl crt /etc/ssl/private/my.domain.com.pem alpn h2,http/1.1
+    bind *:443 ssl crt /etc/ssl/private/domain.example.com.pem alpn h2,http/1.1
     mode http
     option forwardfor
     http-request set-header X-Forwarded-Proto: https
     default_backend web_backend
 
     # DDoS & Rate Limiting
+    # Allows HAProxy to track statistics (like request rates, current connections, etc.) per IP address. This is useful for applying rate limits or connection limits.
     stick-table type ip size 1m expire 30s store http_req_rate(30s),conn_cur
 
+    # ACL flags an IP as abuse if it sends more than 100 HTTP requests within 10 seconds, which is considered a potential DoS (Denial of Service) attack
     acl abuse src_http_req_rate(https_front) gt 100
+
+    # ACL flags an IP if it has more than 10 concurrent connections, which might indicate an abuse of resources or a bot attempting to flood the server with connections.
     acl too_many_conns src_conn_cur gt 10
 
+    # If the abuse ACL condition is met, the incoming HTTP request will be denied, effectively blocking further traffic from that IP.
     http-request deny if abuse
+
+    # If the too_many_conns ACL condition is met, the TCP connection will be rejected, preventing the client from opening additional connections.
     tcp-request content reject if too_many_conns
     http-request track-sc0 src
     http-request deny deny_status 429 if { sc_http_req_rate(0) gt 20 }
 
+
+
     # Security Headers (OWASP)
+    # To Disable iFrame embedding
     http-response set-header X-Frame-Options "DENY"
+
+    # Useful for security because an attacker could upload a file with an incorrect file type (like a .jpg file with malicious JavaScript code inside)
     http-response set-header X-Content-Type-Options "nosniff"
+
+    # It tells browsers that your site should only be accessed over HTTPS, and never HTTP (insecure)
     http-response set-header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+    # Your site will not send any referrer information when a user clicks on a link to navigate to another site
     http-response set-header Referrer-Policy "no-referrer"
+
+    # Helps prevent cross-site scripting (XSS) and other code injection attacks
     http-response set-header Content-Security-Policy "default-src 'self'; script-src 'self';"
+
+    # This header enables a built-in XSS (cross-site scripting) filter in the browser.
     http-response set-header X-XSS-Protection "1; mode=block"
 
-    # CORS Configuration
+
+
+    # CORS
+
+    # ACL flags requests that use the OPTIONS method, which are typically preflight CORS requests.
     acl is_preflight_options method OPTIONS
+
+    # Log the Origin header
     http-request capture req.hdr(Origin) len 20
 
+    # CORS to only allow request from example.com & example.org
     acl allowed_host1 hdr(host) -i example.com
     acl allowed_host2 hdr(host) -i example.org
     acl allowed_host3 hdr(host) -i example.ai
@@ -92,6 +119,7 @@ frontend https_front
 backend web_backend
     mode http
     server local_server localhost:8000 check
+
 ```
 
 ### Step 3: Create Lua CORS File
@@ -374,7 +402,7 @@ Content-Type: text/html
 Once everything is configured, you can start HAProxy. You might want to use a system service to manage HAProxy, or run it manually:
 
 ```bash
-sudo service haproxy start
+sudo systemctl start haproxy
 ```
 
 ### Step 6: Verify HAProxy Configuration
@@ -400,7 +428,3 @@ You may also configure a dedicated frontend for stats if desired.
 - **Testing**: Test the configuration thoroughly to ensure all features (CORS, rate limiting, headers) are functioning as expected.
 - **Logs**: Monitor logs to analyze traffic and errors for tuning performance.
 - **Updates**: Keep your HAProxy updated to benefit from the latest security patches and features.
-
-### Conclusion
-
-This guide should provide a comprehensive framework for setting up HAProxy with the desired features. Adjust the configurations as necessary for your environment and specific requirements. Let me know if you need any more assistance!
